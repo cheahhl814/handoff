@@ -1,22 +1,39 @@
 # handoff-auto — automatic session handoff companion
 
-Companion to the [`handoff`](../SKILL.md) skill. The skill stays the
-**read/write contract**; this directory makes the two operations automatic so
-you never have to invoke `/skill:handoff` by hand.
+Companion to the [`handoff`](../SKILL.md) skill (root README: modes, round
+format, hard guarantees). The skill owns the **read/write contract**; this
+directory makes the two operations automatic so neither the user nor the
+model has to invoke `/skill:handoff` by hand.
 
-| Side | Pi | Claude Code |
-| --- | --- | --- |
-| Takeover at launch | `session_start` → native 3-option dialog; "Take over" sends a real takeover turn | `SessionStart` hook → `hookSpecificOutput.additionalContext` (+ headless verification) |
-| Write at exit | Ctrl+D / `/quit` / double Ctrl+C are intercepted and a Yes/No offer is shown; then `session_shutdown` writes (nested model call) unless the user said No — and only when the workspace has a `handoff.md` or the user confirmed the offer | `SessionEnd` hook → headless `claude -p` on the transcript, same creation policy |
+## Contents
+
+- [What it automates](#what-it-automates)
+- [Layout](#layout)
+- [The contract stays in one place](#the-contract-stays-in-one-place)
+- [Never lose a handoff](#never-lose-a-handoff)
+- [Creation policy](#creation-policy)
+- [Confirmation and exit offer](#confirmation-and-exit-offer)
+- [Install](#install)
+- [Configuration](#configuration)
+- [Manual escape hatches](#manual-escape-hatches)
+- [Tests](#tests)
+- [Notes and limits](#notes-and-limits)
+
+## What it automates
+
+| Side              | Pi                                                                                                                                                       | Claude Code                                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Takeover at launch | `session_start` → native 3-option dialog; "Take over" sends a real takeover turn                                                                        | `SessionStart` hook → `hookSpecificOutput.additionalContext` (+ headless verification)                              |
+| Write at exit      | Ctrl+D / `/quit` / double Ctrl+C are intercepted and a Yes/No offer is shown; then `session_shutdown` writes (nested model call) under the creation policy | `SessionEnd` hook → headless `claude -p` on the transcript, same creation policy                                    |
 
 ## Layout
 
-```
+```text
 companion/
-  core.cjs        shared contract logic + CLI (no model calls, no harness code)
-  pi-extension.ts pi adapter (session_start / session_shutdown / /handoff-now)
-  claude-hook.cjs Claude Code adapter (session-start / session-end)
-  config.json     tunables for both adapters
+├── core.cjs        # shared contract logic + CLI (no model calls, no harness code)
+├── pi-extension.ts # Pi adapter (session_start / session_shutdown / /handoff-now)
+├── claude-hook.cjs # Claude Code adapter (session-start / session-end)
+└── config.json     # tunables for both adapters
 ```
 
 `core.cjs` is the only place that knows the document format. Both adapters
@@ -44,6 +61,12 @@ What the core guarantees:
   re-writing the same session updates that round in place instead of
   duplicating it.
 
+> [!NOTE]
+> The companion currently emits **format 1** (legacy) rounds. Format-2
+> rounds (frontmatter, round markers, typed claims) are written by the
+> manual path; legacy rounds remain first-class inputs on the read side,
+> per the versioning rule in the conventions file.
+
 ## Never lose a handoff
 
 The narrative summary is the only model-dependent part. If the model call
@@ -57,10 +80,10 @@ snapshot parts are always computed locally and are never model-dependent.
 part of the contract in [`../handoff-conventions.md`](../handoff-conventions.md),
 not a companion detail, and both adapters enforce it:
 
-| Situation | Pi | Claude Code |
-| --- | --- | --- |
-| Workspace has a `handoff.md` | Exit offer: *Write a handoff for the next session?* (Yes/No) — unchanged | `SessionEnd` writes the next round automatically |
-| Workspace has no `handoff.md` | Exit offer: *No handoff.md in this workspace — create one for the next session?* — **No first**, so a stray Enter creates nothing | `SessionEnd` writes **nothing** and says so in a `systemMessage`; the `SessionStart` context tells the agent to offer the handoff with `AskUserQuestion` before the session ends |
+| Situation                      | Pi                                                                                                                                                            | Claude Code                                                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Workspace has a `handoff.md`    | Exit offer: *Write a handoff for the next session?* (Yes/No) — unchanged                                                                                     | `SessionEnd` writes the next round automatically                                                                                                       |
+| Workspace has no `handoff.md`   | Exit offer: *No handoff.md in this workspace — create one for the next session?* — **No first**, so a stray Enter creates nothing                            | `SessionEnd` writes **nothing** and says so in a `systemMessage`; the `SessionStart` context tells the agent to offer the handoff before the session ends |
 
 In the Pi case an explicit *Yes* is what authorises the write: the shutdown
 handler creates the document only when the user confirmed it, when a
@@ -75,7 +98,7 @@ old behaviour (write at exit even in a workspace that had no handoff).
 ## Confirmation and exit offer
 
 **Takeover (Pi).** When `handoff.md` exists in a TUI session, a native dialog
-offers: *Take over — verify freshness and continue* (today's takeover turn),
+offers: *Take over — verify freshness and continue* (a real takeover turn),
 *Review the handoff first, don't act yet* (the agent reads the file and
 reports a short digest — the document itself is never pasted into the
 conversation) and *Ignore for now* (nothing is sent, `handoff.md` untouched).
@@ -86,12 +109,13 @@ a prompt guideline and `pi -p` is never hijacked.
 starts with an instruction to ask the same three choices with the native
 `AskUserQuestion` tool before doing anything else.
 
-**Nothing is pasted.** Every takeover path ships a *pointer* — the file path,
-the list of rounds, the instructions — never the document body. The agent
-reads `handoff.md` with its own file-reading tool, exactly like a manual
-`/skill:handoff` invocation, and reports a short summary. The headless
-verifier does the same: it is told to read the file, and it may only use
-Read/Grep/Glob.
+> [!IMPORTANT]
+> **Nothing is pasted.** Every takeover path ships a *pointer* — the file
+> path, the list of rounds, the instructions — never the document body. The
+> agent reads `handoff.md` with its own file-reading tool, exactly like a
+> manual `/skill:handoff` invocation, and reports a short summary. The
+> headless verifier does the same: it is told to read the file, and it may
+> only use Read/Grep/Glob.
 
 **Exit offer (Pi).** `session_shutdown` fires after the TUI is stopped, where
 dialogs hang, so the offer is shown *before* shutdown: a terminal-input listener
@@ -106,17 +130,20 @@ disable it with `writeOnExit: false` and a `systemMessage` reports the file writ
 
 ## Install
 
+Point the two adapters into your agent's hook/extension directories (paths
+use placeholders — substitute your own):
+
 ```bash
 # Pi: extension
-ln -sfn ~/.agents/skills/handoff/companion/pi-extension.ts \
-        ~/.pi/agent/extensions/handoff-auto.ts
+ln -sfn "<skills directory>/handoff/companion/pi-extension.ts" \
+        "<pi extensions dir>/handoff-auto.ts"
 
 # Claude Code: hook
-ln -sfn ~/.agents/skills/handoff/companion/claude-hook.cjs \
-        ~/.claude/hooks/handoff-auto.cjs
+ln -sfn "<skills directory>/handoff/companion/claude-hook.cjs" \
+        "<claude hooks dir>/handoff-auto.cjs"
 ```
 
-Then register the Claude Code hooks in `~/.claude/settings.json`:
+Then register the Claude Code hooks in its settings file (`hooks` key):
 
 ```json
 {
@@ -125,7 +152,7 @@ Then register the Claude Code hooks in `~/.claude/settings.json`:
       {
         "matcher": "startup",
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/hooks/handoff-auto.cjs session-start", "timeout": 150 }
+          { "type": "command", "command": "node <claude hooks dir>/handoff-auto.cjs session-start", "timeout": 150 }
         ]
       }
     ],
@@ -133,7 +160,7 @@ Then register the Claude Code hooks in `~/.claude/settings.json`:
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/hooks/handoff-auto.cjs session-end", "timeout": 240 }
+          { "type": "command", "command": "node <claude hooks dir>/handoff-auto.cjs session-end", "timeout": 240 }
         ]
       }
     ]
@@ -141,8 +168,9 @@ Then register the Claude Code hooks in `~/.claude/settings.json`:
 }
 ```
 
-Claude Code's default hook timeout is **1.5 seconds** — the `timeout` field is
-mandatory here or the handoff is cut off mid-write.
+> [!IMPORTANT]
+> The host's default hook timeout is **1.5 seconds** — the `timeout` field
+> is mandatory here or the handoff is cut off mid-write.
 
 Reload Pi (`/reload`) after installing or changing the extension.
 
@@ -170,7 +198,7 @@ Reload Pi (`/reload`) after installing or changing the extension.
 | `claude.takeoverMode` | `"verify"` | `verify` (headless check), `inject` (instant, no model call) or `off`. |
 | `claude.verifyTimeoutSec` | `90` | Timeout for the headless verification. |
 | `claude.writeTimeoutSec` | `180` | Timeout for the headless summary at session end. |
-| `claude.model` | `null` | Model for the headless calls (null = Claude Code default). |
+| `claude.model` | `null` | Model for the headless calls (null = harness default). |
 | `claude.sessionStartSources` | `["startup"]` | Claude Code session sources that trigger a takeover. |
 | `claude.sessionEndReasons` | `["clear","logout","prompt_input_exit","other"]` | Session-end reasons that trigger a write. |
 
@@ -185,10 +213,10 @@ Set `HANDOFF_AUTO_CONFIG` to point at an alternative config file, and
 - Core CLI (debugging):
 
 ```bash
-node ~/.agents/skills/handoff/companion/core.cjs takeover      --cwd "$PWD"
-node ~/.agents/skills/handoff/companion/core.cjs handoff-exists --cwd "$PWD"
-node ~/.agents/skills/handoff/companion/core.cjs state         --cwd "$PWD"
-node ~/.agents/skills/handoff/companion/core.cjs write         --cwd "$PWD" --agent pi --summary-file /tmp/s.md
+node "<skills directory>/handoff/companion/core.cjs" takeover      --cwd "$PWD"
+node "<skills directory>/handoff/companion/core.cjs" handoff-exists --cwd "$PWD"
+node "<skills directory>/handoff/companion/core.cjs" state         --cwd "$PWD"
+node "<skills directory>/handoff/companion/core.cjs" write         --cwd "$PWD" --agent pi --summary-file /tmp/s.md
 ```
 
 ## Tests
@@ -204,13 +232,14 @@ bash companion/tests/hook-policy-test.sh
 python3 companion/tests/pty-policy-test.py
 ```
 
-The PTY harness drives a real `pi` session in a scratch directory, so it needs
-a working model and takes a few minutes; the hook harness runs in seconds.
+The PTY harness drives a real agent session in a scratch directory, so it
+needs a working model and takes a few minutes; the hook harness runs in
+seconds.
 
 ## Notes and limits
 
-- The headless `claude -p` children run with `HANDOFF_AUTO_IN_CHILD=1` so the
-  hooks never recurse, and without `CLAUDECODE` so nesting is allowed.
+- The headless summary children run with `HANDOFF_AUTO_IN_CHILD=1` so the
+  hooks never recurse, and without the host's nesting-detection env vars.
 - Subagent sessions (`agent_id` in the hook payload) neither take over nor
   hand off.
 - After *Take over*, the Pi takeover message is a real user message: the agent verifies
@@ -220,3 +249,9 @@ a working model and takes a few minutes; the hook harness runs in seconds.
   `verify` mode the verification has already happened by then).
 - The Claude Code write path costs one headless model call per session end;
   the Pi write path costs one nested call on the session's own model.
+
+## Provenance
+
+Ships with the `handoff` skill (see its root README for provenance and the
+format-2 contract). Built as the optional automatic layer of the same
+document contract; the contract itself is never duplicated here.
