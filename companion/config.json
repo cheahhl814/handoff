@@ -1,0 +1,34 @@
+{
+  "handoffFile": "handoff.md",
+  "archiveFile": "handoff-archive.md",
+  "autoTakeover": true,
+  "writeOnExit": true,
+  "takeoverSessionReasons": ["startup"],
+  "writeOnExitReasons": ["quit", "new"],
+  "snapshotDepth": 3,
+  "snapshotExcludes": ".git|node_modules|__pycache__|.venv|venv|dist|build|.mypy_cache|.pytest_cache|.ruff_cache|target|.next|.cache",
+  "maxSnapshotLines": 200,
+  "sectionsBeforeCompact": 3,
+  "maxStateFiles": 25,
+  "maxConversationChars": 60000,
+  "pi": {
+    "useModelSummary": true,
+    "summaryTimeoutSec": 120,
+    "checkpointOnSettle": true,
+    "takeoverConfirm": true,
+    "exitOffer": true,
+    "createIfMissing": false
+  },
+  "claude": {
+    "takeoverMode": "verify",
+    "takeoverConfirm": true,
+    "verifyTimeoutSec": 90,
+    "writeTimeoutSec": 180,
+    "model": null,
+    "verifyTools": ["Read", "Grep", "Glob"],
+    "sessionStartSources": ["startup"],
+    "sessionEndReasons": ["clear", "logout", "prompt_input_exit", "other"],
+    "createIfMissing": false,
+    "optInNotice": true
+  }
+}
