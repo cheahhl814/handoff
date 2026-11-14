@@ -9,7 +9,7 @@ takeover, migration) operating on a single versioned document contract
 (`handoff.md`). Harness-agnostic by design: any agent sharing a workspace
 can read, verify, and append to the same document.
 
-**Repository**: unpublished (local skill directory; no remote configured)
+**Repository**: https://github.com/cheahhl814/handoff
 
 > [!NOTE]
 > Current version: **v2.0.0** (updated 2026-11-14).
@@ -21,6 +21,7 @@ can read, verify, and append to the same document.
 - [Mode overview](#-mode-overview)
 - [Round format (format 2)](#round-format-format-2)
 - [Companion auto-bridge](#companion-auto-bridge)
+- [Update check](#-update-check)
 - [Repository layout](#-repository-layout)
 - [Hard guarantees](#-hard-guarantees)
 - [Provenance](#provenance)
@@ -107,6 +108,25 @@ and round markers; it never rewrites narrative text).
 The legacy-upgrade contract lives in
 [references/format-migration.md](references/format-migration.md).
 
+## 🔄 Update check
+
+Ships a self-update check (adapted from
+[skill-forge](https://github.com/cheahhl814/skill-forge)) that compares the
+deployed copy's git SHA against this repository via `git fetch` — no GitHub
+API call, no extra dependencies.
+
+```bash
+python3 bin/skill-update-check.py
+```
+
+| Verdict | Exit | Meaning |
+|:--------|:-----|:--------|
+| `UP-TO-DATE` | 0 | Local HEAD matches origin/HEAD |
+| `LOCAL-AHEAD` | 0 | Unpushed local commits; no action needed |
+| `BEHIND-BY-N` | 1 | Upstream is N commits ahead → re-sync from this repo |
+| `OFFLINE` | 2 | `git fetch` failed; informational only |
+| `NO-ORIGIN` | 2 | No `origin` remote configured; informational only |
+
 ## Companion auto-bridge
 
 The `companion/` directory ships an **optional** automatic bridge — a Pi
@@ -129,6 +149,8 @@ handoff/
 ├── handoff-conventions.md    # The document contract (single source of truth)
 ├── references/
 │   └── format-migration.md   # Legacy upgrade contract: fixes, never-rewrite rules, checklist
+├── bin/
+│   └── skill-update-check.py  # Self-update check (git-SHA diff vs origin)
 └── companion/                # Optional auto-bridge (Pi extension + Claude Code hooks)
     ├── core.cjs              # Contract logic — the only code that knows the format
     ├── pi-extension.ts       # Pi adapter (session_start / session_shutdown)
