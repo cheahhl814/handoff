@@ -205,6 +205,20 @@ Reload Pi (`/reload`) after installing or changing the extension.
 Set `HANDOFF_AUTO_CONFIG` to point at an alternative config file, and
 `HANDOFF_AUTO_CORE` to relocate the core script.
 
+## Debugging a silent launch
+
+Every quiet decision the Pi extension makes is logged to
+`~/.pi/agent/handoff-auto.log` (override with `HANDOFF_AUTO_LOG`): takeover
+skipped (wrong `session_start` reason, `autoTakeover` off), core unreachable,
+core error, or `no-sections` (the file exists but no round could be parsed).
+Check this file first when a launch shows no takeover dialog.
+
+Round boundaries are recognised either by a `## <agent> — <date>` heading or by
+a bare `<!-- round: ... -->` marker, so hand-written format-2 documents that
+carry only the marker are read fine. A marker directly under an H2 (nothing
+but blank lines between) is treated as that round's metadata, not as a new
+round.
+
 ## Manual escape hatches
 
 - Pi: `/handoff-now` writes a handoff immediately (same format as the exit

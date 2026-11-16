@@ -19,12 +19,35 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
 const CORE_PATH = process.env.HANDOFF_AUTO_CORE || join(homedir(), ".agents/skills/handoff/companion/core.cjs");
+const LOG_PATH = process.env.HANDOFF_AUTO_LOG || join(homedir(), ".pi", "agent", "handoff-auto.log");
+
+/**
+ * Append a line to the handoff-auto log. Never throws: logging must not
+ * break the host session. This is where silent failures surface — check
+ * this file when a launch shows no takeover dialog.
+ */
+function logEvent(level: string, message: string): void {
+	try {
+		appendFileSync(LOG_PATH, `${new Date().toISOString()} [${level}] ${message}\n`);
+	} catch {
+		// logging must never break the session
+	}
+}
+
+function safeNotify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "warning"): void {
+	try {
+		if ((ctx as { hasUI?: boolean }).hasUI === false) return;
+		ctx.ui?.notify(message, level);
+	} catch {
+		// the log line is the record of last resort
+	}
+}
 
 const SUMMARY_SYSTEM_PROMPT = `You write the narrative part of a session handoff document.
 
@@ -133,6 +156,7 @@ export default function (pi: ExtensionAPI) {
 			pi.sendUserMessage(takeover.message, { deliverAs: "followUp" });
 		} catch (err) {
 			pendingTakeover = takeover;
+			logEvent("error", `deliverTakeover failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -140,11 +164,15 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const result = await pi.exec("node", [CORE_PATH, ...args], { cwd, timeout: timeoutMs });
 			if (result.code !== 0 && !result.stdout.trim()) {
-				return { ok: false, error: result.stderr.trim() || `core exited ${result.code}` };
+				const message = result.stderr.trim() || `core exited ${result.code}`;
+				logEvent("error", `core ${args[0]} failed: ${message}`);
+				return { ok: false, error: message };
 			}
 			return JSON.parse(result.stdout) as CoreReply;
 		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+			const message = err instanceof Error ? err.message : String(err);
+			logEvent("error", `core ${args[0]} error: ${message}`);
+			return { ok: false, error: message };
 		}
 	}
 
@@ -154,6 +182,13 @@ export default function (pi: ExtensionAPI) {
 			const loaded = reply.config as Partial<HandoffConfig>;
 			// pi is a sub-object: merge it deeply so a config that omits a key keeps its default.
 			return { ...DEFAULT_CONFIG, ...loaded, pi: { ...DEFAULT_CONFIG.pi, ...(loaded.pi || {}) } } as HandoffConfig;
+		}
+		if (!reply) {
+			logEvent("warn", "loadConfig: core unreachable — using built-in defaults");
+		} else if (!reply.ok) {
+			logEvent("warn", `loadConfig: core error (${reply.error || "unknown"}) — using built-in defaults`);
+		} else {
+			logEvent("warn", "loadConfig: core reply carried no config — using built-in defaults");
 		}
 		return DEFAULT_CONFIG;
 	}
@@ -378,7 +413,10 @@ export default function (pi: ExtensionAPI) {
 			const checkpoint = loadCheckpoint(ctx.cwd);
 			files = checkpoint.files || [];
 		}
-		if (!conversation.trim() && files.length === 0) return null;
+		if (!conversation.trim() && files.length === 0) {
+			logEvent("info", "handoff write skipped: empty conversation and no touched files");
+			return null;
+		}
 
 		const tmp = mkdtempSync(join(tmpdir(), "handoff-auto-"));
 		const summaryFile = join(tmp, "summary.md");
@@ -405,7 +443,10 @@ export default function (pi: ExtensionAPI) {
 			if (files.length > 0) args.push("--files", files.join(","));
 
 			const result = await core(args, ctx.cwd, 120000);
-			if (!result || !result.ok) return null;
+			if (!result || !result.ok) {
+				logEvent("error", `handoff write failed: ${result ? result.error || "unknown core error" : "core unreachable"} (cwd=${ctx.cwd})`);
+				return null;
+			}
 			return (result.path as string) || null;
 		} finally {
 			try {
@@ -519,11 +560,31 @@ export default function (pi: ExtensionAPI) {
 		authorisedWrite = false;
 
 		if (ctx.mode === "tui" && config.pi.exitOffer && config.writeOnExit) installExitOffer(ctx);
-		if (!config.autoTakeover) return;
-		if (!config.takeoverSessionReasons.includes(event.reason)) return;
+		if (!config.autoTakeover) {
+			logEvent("info", "takeover skipped: autoTakeover disabled in config");
+			return;
+		}
+		if (!config.takeoverSessionReasons.includes(event.reason)) {
+			logEvent("info", `takeover skipped: reason=${event.reason} not in [${config.takeoverSessionReasons.join(",")}]`);
+			return;
+		}
 
 		const reply = await core(["takeover", "--cwd", ctx.cwd], ctx.cwd, 20000);
-		if (!reply || !reply.ok || !reply.found) return;
+		if (!reply) {
+			logEvent("error", `takeover check failed: core unreachable (cwd=${ctx.cwd})`);
+			safeNotify(ctx, "handoff-auto: takeover check failed — see ~/.pi/agent/handoff-auto.log");
+			return;
+		}
+		if (!reply.ok) {
+			logEvent("error", `takeover check failed: ${reply.error || "unknown core error"} (cwd=${ctx.cwd})`);
+			safeNotify(ctx, `handoff-auto: takeover check failed (${reply.error || "unknown"}) — see ~/.pi/agent/handoff-auto.log`);
+			return;
+		}
+		if (!reply.found) {
+			logEvent("info", `takeover: no takeover offered (cwd=${ctx.cwd}, reason=${(reply as { reason?: string }).reason || "unknown"}, path=${(reply.path as string) || "n/a"})`);
+			return;
+		}
+		logEvent("info", `takeover: found ${reply.path as string} (${(reply.sectionCount as number) ?? "?"} rounds)`);
 
 		const message = reply.message as string;
 		const path = reply.path as string;
@@ -575,7 +636,10 @@ export default function (pi: ExtensionAPI) {
 		unsubscribeInput?.();
 		unsubscribeInput = null;
 		const reasons = config.writeOnExitReasons || ["quit", "new"];
-		if (!config.writeOnExit) return;
+		if (!config.writeOnExit) {
+			logEvent("info", "exit write skipped: writeOnExit disabled");
+			return;
+		}
 
 		const authorised = authorisedWrite;
 		authorisedWrite = false;
@@ -590,10 +654,16 @@ export default function (pi: ExtensionAPI) {
 		// in the exit offer (or config.pi.createIfMissing is on).
 		const exists = handoffExists(ctx.cwd);
 		const mayCreate = config.pi?.createIfMissing === true;
-		if (!exists && !authorised && !mayCreate) return;
+		if (!exists && !authorised && !mayCreate) {
+			logEvent("info", `exit write skipped: no handoff.md in ${ctx.cwd} and creation not authorised (reason=${event.reason})`);
+			return;
+		}
 		// The reason filter only guards the automatic path: an explicit "yes" in
 		// the exit offer writes no matter how the session ends.
-		if (!authorised && !reasons.includes(event.reason)) return;
+		if (!authorised && !reasons.includes(event.reason)) {
+			logEvent("info", `exit write skipped: reason=${event.reason} not in [${reasons.join(",")}]`);
+			return;
+		}
 
 		try {
 			const written = await writeHandoff(ctx);
@@ -605,7 +675,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		} catch (err) {
-			// Never let handoff bookkeeping break the shutdown path.
+			logEvent("error", `session_shutdown handoff failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 

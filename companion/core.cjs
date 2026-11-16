@@ -221,12 +221,25 @@ function git(cwd, args) {
 /* ----------------------------------------------------------- handoff parsing */
 
 /**
- * Split a handoff document into a header block and its `## ` update sections.
+ * Split a handoff document into a header block and its update sections.
  * Sections keep their raw text so archived history stays verbatim.
+ *
+ * A section starts at either a `## ` heading (canonical writer output) or a
+ * `<!-- round: -->` marker. Hand-written format-2 rounds sometimes carry only
+ * the marker and no H2 heading; without this the reader found zero sections
+ * and silently reported "no handoff". A marker that merely carries the
+ * metadata of the H2 it directly follows is not a second, empty boundary.
  */
+function roundMarkerHeading(markerLine) {
+	const agent = markerLine.match(/\bagent=([^\s>]+)/);
+	const written = markerLine.match(/\bwritten=([^\s>]+)/);
+	if (agent && written) return `${agent[1]} — ${written[1].slice(0, 10)}`;
+	return markerLine.trim();
+}
+
 function parseHandoff(text) {
 	const lines = (text || "").split(/\r?\n/);
-	const starts = [];
+	const boundaries = [];
 	// Headings inside a fenced block are content, not document sections: the
 	// deterministic summary embeds a transcript tail that carries "## User" and
 	// "## Assistant" lines, and counting those would make the latest section a
@@ -246,20 +259,37 @@ function parseHandoff(text) {
 			return;
 		}
 		if (inFence) return;
-		if (/^##\s+\S/.test(line)) starts.push(index);
+		if (/^##\s+\S/.test(line)) {
+			boundaries.push({ index, kind: "h2" });
+			return;
+		}
+		if (/^<!--\s*round:/.test(line)) {
+			boundaries.push({ index, kind: "round" });
+		}
 	});
+	// A round marker directly under an H2 (nothing but blank lines between) is
+	// that H2 round's metadata line, not a new section.
+	const starts = [];
+	for (const boundary of boundaries) {
+		const prev = starts[starts.length - 1];
+		if (boundary.kind === "round" && prev && prev.kind === "h2") {
+			const between = lines.slice(prev.index + 1, boundary.index).join("\n").trim();
+			if (between === "") continue;
+		}
+		starts.push(boundary);
+	}
 	if (starts.length === 0) {
 		return { header: (text || "").replace(/\s+$/, ""), sections: [] };
 	}
-	const header = lines.slice(0, starts[0]).join("\n").replace(/\s+$/, "");
+	const header = lines.slice(0, starts[0].index).join("\n").replace(/\s+$/, "");
 	const sections = [];
 	for (let i = 0; i < starts.length; i++) {
-		const start = starts[i];
-		const end = i + 1 < starts.length ? starts[i + 1] : lines.length;
+		const start = starts[i].index;
+		const end = i + 1 < starts.length ? starts[i + 1].index : lines.length;
 		const raw = lines.slice(start, end).join("\n").replace(/\s+$/, "");
 		const markerMatch = raw.match(/<!--\s*handoff-auto:([^\s>]+)\s*-->/);
 		sections.push({
-			heading: lines[start].trim(),
+			heading: starts[i].kind === "round" ? roundMarkerHeading(lines[start]) : lines[start].trim(),
 			raw,
 			marker: markerMatch ? markerMatch[1] : null,
 		});
@@ -892,8 +922,14 @@ function main(argv) {
 		case "takeover": {
 			const handoff = readHandoff(cwd, cfg);
 			const parsed = parseHandoff(handoff.text);
-			if (!handoff.exists || !handoff.text.trim() || parsed.sections.length === 0) {
-				return { ok: true, found: false, path: handoff.path };
+			if (!handoff.exists) {
+				return { ok: true, found: false, path: handoff.path, reason: "missing" };
+			}
+			if (!handoff.text.trim()) {
+				return { ok: true, found: false, path: handoff.path, reason: "empty" };
+			}
+			if (parsed.sections.length === 0) {
+				return { ok: true, found: false, path: handoff.path, reason: "no-sections" };
 			}
 			return {
 				ok: true,
